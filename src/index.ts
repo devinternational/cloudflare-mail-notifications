@@ -10,17 +10,93 @@
  *
  * Learn more at https://developers.cloudflare.com/workers/
  */
+import { LetterparserNode, parse as parseRawEmail } from 'letterparser'
+import { nanoid } from 'nanoid'
+
+interface ENV {
+	SLACK_CHANNEL: string
+	SLACK_BOT_TOKEN: SecretsStoreSecret
+	MAIL_NOTIFICATIONS: KVNamespace
+}
 
 export default {
-	async fetch(request, env, ctx): Promise<Response> {
-		const url = new URL(request.url);
-		switch (url.pathname) {
-			case '/message':
-				return new Response('Hello, World!');
-			case '/random':
-				return new Response(crypto.randomUUID());
-			default:
-				return new Response('Not Found', { status: 404 });
+	async email(message: ForwardableEmailMessage, env: ENV): Promise<void> {
+		const uid = nanoid()
+		const { raw } = message
+		const rawEmail = (await (new Response(raw)).text()).replace(/utf-8/gi, 'utf-8')
+		const email = parseRawEmail(rawEmail)
+
+		await env.MAIL_NOTIFICATIONS.put(uid, JSON.stringify(email))
+
+		const { headers, body: emailBody } = email
+		const from = headers['From']
+		const to = headers['To']
+		const subject = headers['Subject']
+		const date = headers['Date']
+		const body = emailBody as LetterparserNode[]
+		const htmlBody = body.find((node) => node.contentType.type === 'text/plain')
+
+		const response = await fetch('https://slack.com/api/chat.postMessage', {
+			method: 'POST',
+			headers: {
+				'Authorization': `Bearer ${await env.SLACK_BOT_TOKEN.get()}`,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				channel: env.SLACK_CHANNEL,
+				blocks: [
+					{
+						type: "header",
+						text: {
+							type: "plain_text",
+							text: `✉️ ${subject}`,
+							emoji: true,
+						},
+					},
+					{
+						type: "divider",
+					},
+					{
+						type: "section",
+						fields: [
+							{
+								type: "mrkdwn",
+								text: "*from*",
+							},
+							{
+								type: "mrkdwn",
+								text: "*to*",
+							},
+							{
+								type: "plain_text",
+								text: from || 'unknown',
+							},
+							{
+								type: "plain_text",
+								text: to || 'unknown',
+							},
+						],
+					},
+					{
+						type: "section",
+						text: {
+							type: "mrkdwn",
+							text: (htmlBody?.body as string)?.slice(0, 2999) || '(empty)',
+						},
+					},
+					{
+						"type": "section",
+						"text": {
+							"type": "mrkdwn",
+							"text": `_At: ${date}_\n_uid: ${uid}_`,
+						},
+					},
+				],
+			}),
+		})
+
+		if (!response.ok) {
+			throw new Error(`Failed to send message to Slack`)
 		}
 	},
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<ENV>
