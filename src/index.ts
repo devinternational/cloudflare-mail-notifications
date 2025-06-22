@@ -36,12 +36,17 @@ export default {
 		const body = emailBody as LetterparserNode[]
 		const htmlBody = body.find((node) => node.contentType.type === 'text/plain')
 
-		const response = await fetch('https://slack.com/api/chat.postMessage', {
+		const slackAPIEndpoint = 'https://slack.com/api/chat.postMessage'
+		const options = {
 			method: 'POST',
 			headers: {
 				'Authorization': `Bearer ${await env.SLACK_BOT_TOKEN.get()}`,
 				'Content-Type': 'application/json',
 			},
+		}
+
+		const initialMessageResponse = await fetch(slackAPIEndpoint, {
+			...options,
 			body: JSON.stringify({
 				channel: env.SLACK_CHANNEL,
 				blocks: [
@@ -78,13 +83,6 @@ export default {
 						],
 					},
 					{
-						type: "section",
-						text: {
-							type: "mrkdwn",
-							text: (htmlBody?.body as string)?.slice(0, 2999) || '(empty)',
-						},
-					},
-					{
 						"type": "section",
 						"text": {
 							"type": "mrkdwn",
@@ -95,8 +93,39 @@ export default {
 			}),
 		})
 
-		if (!response.ok) {
-			throw new Error(`Failed to send message to Slack`)
+		if (!initialMessageResponse.ok) {
+			throw new Error(`Failed to send initial message to Slack: ${await initialMessageResponse.text()}`)
+		}
+
+		const initialMessageData = await initialMessageResponse.json()
+		const threadTs = (initialMessageData as any).ts
+
+		const bodyContent = htmlBody?.body as string
+		if (threadTs && bodyContent) {
+			const chunkSize = 2999
+			for (let i = 0; i < bodyContent.length; i += chunkSize) {
+				const chunk = bodyContent.slice(i, i + chunkSize)
+				const threadResponse = await fetch(slackAPIEndpoint, {
+					...options,
+					body: JSON.stringify({
+						channel: env.SLACK_CHANNEL,
+						thread_ts: threadTs,
+						blocks: [
+							{
+								type: "section",
+								text: {
+									type: "mrkdwn",
+									text: chunk,
+								},
+							},
+						],
+					}),
+				})
+
+				if (!threadResponse.ok) {
+					console.error(`Failed to send a threaded message to Slack: ${await threadResponse.text()}`)
+				}
+			}
 		}
 	},
 } satisfies ExportedHandler<ENV>
